@@ -1,93 +1,125 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+from tqdm import tqdm
 
-# ==========================================
-# 1. 用户配置区域 (User Configuration)
-# ==========================================
+# ================= 配置区域 =================
+DATA_DIR = "/data/zm/12.17_test/"
 
-file_path_low = '/data/zm/micro_dataset_shixiong/0.2778_1.csv'  # 低速数据路径
-file_path_high = '/data/zm/micro_dataset_shixiong/2.2222_1.csv'  # 高速数据路径
-
-# **在这里手动填写你要分析的像素坐标**
-# 格式: (Row行号, Col列号)
-# 你可以填一个，也可以填多个（会把结果叠加），建议先填一个最亮的点
-target_pixels = [
-    (103, 171),  # <--- 请修改这里，替换为你选择的坐标
-    # (306, 412), # 如果想对比多个点，可以取消注释加一行
+FILES = [
+    "0.2mm_clip.csv", "0.5mm_clip.csv", "0.8mm_clip.csv",
+    "1.0mm_clip.csv", "1.2mm_clip.csv", "1.5mm_clip.csv",
+    "1.8mm_clip.csv", "2.0mm_clip.csv", "2.2mm_clip.csv",
+    "2.5mm_clip.csv"
 ]
 
-time_unit_scale = 1e6  # 时间戳单位 (1e6 = 微秒)
-analyze_duration = 2.0  # 分析时长 (秒)
+VELOCITIES = [0.2, 0.5, 0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.2, 2.5]
 
 
-# ==========================================
-# 2. 数据提取函数 (保持不变)
-# ==========================================
-def extract_isi(file_path, label, pixels):
-    print(f"[{label}] 正在提取数据...")
+def count_lines_and_get_times(filepath):
+    """
+    高效计算文件行数，并获取首尾时间戳
+    """
+    count = 0
+    t_start = None
+    t_end = None
+
+    # 使用 chunksize 分块读取，既省内存又快
+    # 我们只关心 't' (最后一列)，假设是第4列 (col, row, p, t)
+    # 如果列数不对，pandas可能会报错，请根据实际情况调整 usecols
     try:
-        df = pd.read_csv(file_path, header=None, names=['row', 'col', 'brightness', 'polarity', 't'])
-        df = df.set_index(['row', 'col']).sort_index()
-        all_isi = []
+        # 先读第一行获取 t_start
+        df_head = pd.read_csv(filepath, header=None, nrows=1)
+        t_start = df_head.iloc[0, 3]  # 假设时间在第4列
 
-        for (r, c) in pixels:
-            if (r, c) in df.index:
-                pixel_data = df.loc[(r, c)]
-                if isinstance(pixel_data, pd.Series): pixel_data = pixel_data.to_frame().T
+        # 分块计数
+        with pd.read_csv(filepath, header=None, chunksize=1000000, names=['c', 'r', 'p', 't']) as reader:
+            for chunk in reader:
+                count += len(chunk)
+                # 更新 t_end (这是当前块的最后一行)
+                t_end = chunk['t'].iloc[-1]
 
-                t_raw = pixel_data['t'].values
-                t_raw.sort()
-                t_sec = (t_raw - t_raw[0]) / time_unit_scale
-                t_valid = t_raw[t_sec <= analyze_duration]
+        return count, t_start, t_end
 
-                if len(t_valid) > 1:
-                    isi_us = np.diff(t_valid)
-                    isi_us = isi_us[isi_us > 0]
-                    if len(isi_us) > 0:
-                        all_isi.extend(np.log10(isi_us))
-        return np.array(all_isi)
     except Exception as e:
-        print(f"错误: {e}")
-        return np.array([])
+        print(f"\n❌ 读取失败 {filepath}: {e}")
+        return 0, 0, 0
 
 
-# ==========================================
-# 3. 执行与绘图 (关键修改部分)
-# ==========================================
-isi_low = extract_isi(file_path_low, "Low Speed", target_pixels)
-isi_high = extract_isi(file_path_high, "High Speed", target_pixels)
+def analyze_exact_density():
+    exact_counts = []
+    durations = []
+    rates = []
 
-if len(isi_low) > 0 and len(isi_high) > 0:
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    print(f"开始精确扫描 (可能需要几分钟)...")
 
-    # 设定直方图的区间
-    bins = np.linspace(2.5, 5.5, 100)  # 重点关注 Log 2.5~5.5 区域
+    for filename in FILES:
+        path = os.path.join(DATA_DIR, filename)
+        if not os.path.exists(path):
+            print(f"❌ 警告: 找不到 {filename}")
+            exact_counts.append(0)
+            durations.append(0)
+            rates.append(0)
+            continue
 
-    # 1. 计算直方图数据 (但不画图)
-    counts_low, _ = np.histogram(isi_low, bins=bins, density=True)
-    counts_high, _ = np.histogram(isi_high, bins=bins, density=True)
+        print(f"正在扫描: {filename} ...", end="\r")
 
-    # **关键步骤：获取两者的最大密度，统一Y轴上限**
-    max_density = max(counts_low.max(), counts_high.max())
-    y_limit = max_density * 1.1  # 留出 10% 顶空
+        # === 核心：精确计数 ===
+        N, t_start, t_end = count_lines_and_get_times(path)
 
-    # 2. 绘制低速图
-    ax1.hist(isi_low, bins=bins, color='#1f77b4', alpha=0.8, density=True)
-    ax1.set_title(f'Low Speed (0.2778) ISI Distribution\nMax Density = {counts_low.max():.2f}')
-    ax1.set_ylabel('Probability Density')
-    ax1.set_ylim(0, y_limit)  # 锁定 Y 轴
-    ax1.grid(True, linestyle='--', alpha=0.3)
+        if N > 0:
+            duration = (t_end - t_start) / 1e6  # 秒
+            rate = N / duration
+        else:
+            duration = 0
+            rate = 0
 
-    # 3. 绘制高速图
-    ax2.hist(isi_high, bins=bins, color='#d62728', alpha=0.8, density=True)
-    ax2.set_title(f'High Speed (2.2222) ISI Distribution\nMax Density = {counts_high.max():.2f}')
-    ax2.set_xlabel('Log10(ISI in microseconds) [3.0 = 1ms, 4.0 = 10ms]')
-    ax2.set_ylabel('Probability Density')
-    ax2.set_ylim(0, y_limit)  # 锁定 Y 轴 (与上面一致)
-    ax2.grid(True, linestyle='--', alpha=0.3)
+        exact_counts.append(N)
+        durations.append(duration)
+        rates.append(rate)
+
+    print("\n扫描完成。")
+
+    # --- 绘图 ---
+    plt.figure(figsize=(15, 5))
+
+    # 图1: 精确事件总数 (Total Count)
+    plt.subplot(1, 3, 1)
+    plt.plot(VELOCITIES, exact_counts, 'g-o', linewidth=2)
+    plt.title("Exact Total Events (N)")
+    plt.xlabel("Velocity (mm/s)")
+    plt.ylabel("Total Lines")
+    plt.grid(True, alpha=0.5)
+
+    # 图2: 录制时长 (Duration)
+    plt.subplot(1, 3, 2)
+    plt.plot(VELOCITIES, durations, 'b-o', linewidth=2)
+    plt.title("Recording Duration (T)")
+    plt.xlabel("Velocity (mm/s)")
+    plt.ylabel("Seconds")
+    plt.grid(True, alpha=0.5)
+
+    # 图3: 真实事件密度 (Rate = N/T)
+    plt.subplot(1, 3, 3)
+    plt.plot(VELOCITIES, rates, 'r-x', linewidth=2)
+    plt.title("True Event Rate (N/T)")
+    plt.xlabel("Velocity (mm/s)")
+    plt.ylabel("Events per Second")
+    plt.grid(True, alpha=0.5)
 
     plt.tight_layout()
-    plt.show()
-else:
-    print("数据不足。")
+    plt.savefig('/data/zm/12.22/check_exact_density.png', dpi=300)
+    print("\n✅ 结果已保存为 check_exact_density.png")
+
+    # 打印详细数据表
+    print("\n" + "=" * 65)
+    print(f"{'Vel':<6} | {'Total Events':<15} | {'Duration(s)':<12} | {'Rate(E/s)':<15}")
+    print("-" * 65)
+    for v, n, d, r in zip(VELOCITIES, exact_counts, durations, rates):
+        print(f"{v:<6.1f} | {n:<15,d} | {d:<12.4f} | {r:<15,.1f}")
+    print("=" * 65)
+
+
+if __name__ == "__main__":
+    analyze_exact_density()
